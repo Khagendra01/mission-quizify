@@ -2,28 +2,31 @@ import streamlit as st
 import os
 import sys
 import json
-sys.path.append(os.path.abspath('../../'))
-from tasks.task_3.task_3 import DocumentProcessor
-from tasks.task_4.task_4 import EmbeddingClient
-from tasks.task_5.task_5 import ChromaCollectionCreator
 
-from langchain_core.prompts import PromptTemplate
-from langchain_google_vertexai import VertexAI
+# Set the page config at the very beginning
+st.set_page_config(page_title="Quiz Builder")
+
+# 确保 Python 可以找到 `tasks` 文件夹中的模块
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+try:
+    from tasks.task_3.task_3 import DocumentProcessor
+    from tasks.task_4.task_4 import EmbeddingClient
+    from tasks.task_5.task_5 import ChromaCollectionCreator
+    from langchain_core.prompts import PromptTemplate
+    from langchain_google_vertexai import VertexAI
+    print("Modules imported successfully")
+except ImportError as e:
+    print(f"Error importing modules: {e}")
 
 class QuizGenerator:
     def __init__(self, topic=None, num_questions=1, vectorstore=None):
-        if not topic:
-            self.topic = "General Knowledge"
-        else:
-            self.topic = topic
-
+        self.topic = topic if topic else "General Knowledge"
         if num_questions > 10:
             raise ValueError("Number of questions cannot exceed 10.")
         self.num_questions = num_questions
-
         self.vectorstore = vectorstore
         self.llm = None
-        self.question_bank = []
+        self.question_bank = []  # Initialize the question bank to store questions
         self.system_template = """
             You are a subject matter expert on the topic: {topic}
             
@@ -51,17 +54,28 @@ class QuizGenerator:
     
     def init_llm(self):
         self.llm = VertexAI(
-            model_name = "gemini-pro",
-            temperature = 0.8,
-            max_output_tokens = 500
+            model_name="gemini-pro",
+            temperature=0.8,  # Increased for less deterministic questions
+            max_output_tokens=500
         )
+
+    def is_valid_json(self, json_str):
+        try:
+            json.loads(json_str)
+            return True
+        except ValueError as e:
+            return False
+
+    def clean_response(self, response):
+        # 去除多余的换行符和回车符
+        return response.replace('\n', '').replace('\r', '')
 
     def generate_question_with_vectorstore(self):
         if not self.llm:
             self.init_llm()
         if not self.vectorstore:
             raise ValueError("Vectorstore not provided.")
-        
+
         from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 
         retriever = self.vectorstore.as_retriever()
@@ -69,35 +83,60 @@ class QuizGenerator:
         setup_and_retrieval = RunnableParallel(
             {"context": retriever, "topic": RunnablePassthrough()}
         )
-        chain = setup_and_retrieval | prompt | self.llm 
-        response = chain.invoke(self.topic)
-        return response
+        chain = setup_and_retrieval | prompt | self.llm
+
+        try:
+            response = chain.invoke(self.topic)
+            print("LLM Response:", response)
+            
+            # 确保响应是字符串，如果不是，则将其转换为字符串
+            if isinstance(response, dict):
+                response = json.dumps(response)
+            elif not isinstance(response, str):
+                response = str(response)
+
+            cleaned_response = self.clean_response(response)
+            print("Raw Response for Debugging:", cleaned_response)
+            if self.is_valid_json(cleaned_response):
+                response_json = json.loads(cleaned_response)
+                print("Decoded Response:", response_json)
+                return response_json
+            else:
+                print("Invalid JSON response.")
+                return None
+        except json.JSONDecodeError as e:
+            print(f"JSONDecodeError: {e}")
+            print(f"Raw Response for Debugging: {cleaned_response}")
+            return None
+        except Exception as e:
+            print(f"Failed to get response from LLM: {e}")
+            return None
 
     def generate_quiz(self) -> list:
         self.question_bank = []
 
         for _ in range(self.num_questions):
-            question_str = self.generate_question_with_vectorstore()
-            try:
-                question = json.loads(question_str)
-            except json.JSONDecodeError:
-                print("Failed to decode question JSON.")
+            question_dict = self.generate_question_with_vectorstore()
+            if not question_dict:
+                print("Skipping invalid question.")
                 continue
-            if self.validate_question(question):
-                self.question_bank.append(question)
+            print("Raw Question Dict:", question_dict)
+
+            if self.validate_question(question_dict):
+                print("Successfully generated unique question")
+                self.question_bank.append(question_dict)
             else:
                 print("Duplicate or invalid question detected.")
+
         return self.question_bank
 
     def validate_question(self, question: dict) -> bool:
-        if 'question' not in question:
+        if "question" not in question:
             return False
-        question_text = question['question']
-        for existing_question in self.question_bank:
-            if existing_question['question'] == question_text:
+        for q in self.question_bank:
+            if q["question"] == question["question"]:
                 return False
         return True
-
 
 # Test Generating the Quiz
 if __name__ == "__main__":
@@ -108,38 +147,37 @@ if __name__ == "__main__":
         "location": "us-central1"
     }
     
-    screen = st.empty()
-    with screen.container():
-        st.header("Quiz Builder")
+    try:
         processor = DocumentProcessor()
         processor.ingest_documents()
-    
-        embed_client = EmbeddingClient(**embed_config)
+        embed_client = EmbeddingClient(**embed_config)  # Initialize from Task 4
         chroma_creator = ChromaCollectionCreator(processor, embed_client)
+        print("DocumentProcessor, EmbeddingClient, and ChromaCollectionCreator initialized successfully")
+    except Exception as e:
+        print(f"Error initializing components: {e}")
     
-        question = None
-        question_bank = None
+    st.header("Quiz Builder")
     
-        with st.form("Load Data to Chroma"):
-            st.subheader("Quiz Builder")
-            st.write("Select PDFs for Ingestion, the topic for the quiz, and click Generate!")
-            
-            topic_input = st.text_input("Topic for Generative Quiz", placeholder="Enter the topic of the document")
-            questions = st.slider("Number of Questions", min_value=1, max_value=10, value=1)
-            
-            submitted = st.form_submit_button("Submit")
-            if submitted:
+    with st.form("Load Data to Chroma"):
+        st.subheader("Quiz Builder")
+        st.write("Select PDFs for Ingestion, the topic for the quiz, and click Generate!")
+        
+        topic_input = st.text_input("Topic for Generative Quiz", placeholder="Enter the topic of the document")
+        questions = st.slider("Number of Questions", min_value=1, max_value=10, value=1)
+        
+        submitted = st.form_submit_button("Submit")
+        if submitted:
+            try:
                 chroma_creator.create_chroma_collection()
-                
                 st.write(topic_input)
-                
                 generator = QuizGenerator(topic_input, questions, chroma_creator)
                 question_bank = generator.generate_quiz()
-                question = question_bank[0]
-
-    if question_bank:
-        screen.empty()
-        with st.container():
-            st.header("Generated Quiz Questions: ")
-            for question in question_bank:
-                st.write(question)
+                if question_bank and len(question_bank) > 0:
+                    st.header("Generated Quiz Questions: ")
+                    for question in question_bank:
+                        st.json(question)
+                else:
+                    st.error("No questions generated. Please check the logs for errors.")
+            except Exception as e:
+                print(f"Error during quiz generation: {e}")
+                st.error("An error occurred during quiz generation. Please check the logs.")
